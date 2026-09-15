@@ -1,0 +1,41 @@
+{
+  "manifest_version": 2,
+  "name": "NFLPerry NBA Live Assistant (Firefox) — Auto Sync V4",
+  "version": "1.2.0",
+  "description": "Automatic NFLPerry page sync + live potential, expected finish and 295+ chance.",
+  "permissions": [
+    "storage",
+    "https://api.nflperry.com/*",
+    "https://nflperry.com/*",
+    "https://www.nflperry.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://nflperry.com/game-mode/nba*",
+        "https://www.nflperry.com/game-mode/nba*"
+      ],
+      "js": [
+        "core.js",
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    "calc-worker.js",
+    "players.json"
+  ],
+  "browser_action": {
+    "default_title": "NFLPerry NBA Live Assistant"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nflperry-nba-live-assistant@local",
+      "strict_min_version": "109.0"
+    }
+  }
+}
