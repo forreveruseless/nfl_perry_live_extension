@@ -9,7 +9,7 @@
   let roster={}, currentTeam="SAS", autoCapture=true;
   let pageSync=true, lastPageSignature="";
   let autoDraft=false, autoStrategy="potential", autoDelay=900;
-  let autoRestart=false, restartBusy=false;
+  let autoRestart=false, restartBusy=false, startGameBusy=false;
   let minPotentialValue="", useSiteHighScore=false, thresholdRestartBusy=false;
   let autoBusy=false, autoTimer=null, autoPendingKey="", autoRunToken=0;
   let gameHistory=[], lastRecordedGameSig="";
@@ -197,7 +197,7 @@
             </div>
 
             <div class="nflp-foot">
-              <b>AUTO DRAFT</b> сам открывает слот, ищет игрока и подтверждает выбор по странице.<br>
+              <b>AUTO DRAFT</b> сам нажимает Start Game, открывает слот, ищет игрока и подтверждает выбор по странице.<br>
               <b>PAGE SYNC</b> использует NFLPerry как источник истины.<br>
               POTENTIAL — максимальный потолок; EXPECTED — средний итог; 295+ — шанс закончить ≥295.
             </div>
@@ -1155,6 +1155,79 @@
       </details>`).join("");
   }
 
+  function startGameButtonCandidates(){
+    const nodes=[...document.querySelectorAll("button,a,[role='button']")]
+      .filter(el=>!root.contains(el)&&visible(el));
+    return nodes.map(el=>{
+      const text=normText(el.innerText||el.textContent||"").trim();
+      const compact=text.toLowerCase().replace(/[!?.]+$/," ").trim();
+      let score=-1;
+      if(compact==="start game")score=200;
+      else if(compact==="start")score=80;
+      else if(/^start\s+game\b/i.test(text))score=120;
+      return {el,text,score};
+    }).filter(x=>x.score>=0).sort((a,b)=>b.score-a.score);
+  }
+
+  function onStartScreen(){
+    const parsed=parsePageStateFromLines(pageLines());
+    const page=readRosterFromPage();
+    const candidates=startGameButtonCandidates();
+    return !parsed.pick && page.occupied===0 && candidates.length>0;
+  }
+
+  function continuousAutomationWanted(){
+    return !!(autoDraft || autoRestart || thresholdEnabled());
+  }
+
+  async function maybeAutoStartGame(reason="автопродолжение"){
+    if(startGameBusy||restartBusy||!continuousAutomationWanted())return false;
+    const list=startGameButtonCandidates();
+    if(!list.length)return false;
+    const candidate=list.length===1?list[0]:(list[0].score>list[1].score?list[0]:null);
+    if(!candidate)return false;
+
+    const page=readRosterFromPage();
+    const parsed=page.parsed||{};
+    if(parsed.pick||page.occupied>0)return false;
+
+    startGameBusy=true;
+    const status=$("#nflp-restart-status",root);
+    try{
+      if(status)status.textContent=`${reason}: нажимаю Start Game…`;
+      candidate.el.scrollIntoView({block:"center",behavior:"auto"});
+      await sleep(180);
+      candidate.el.click();
+
+      const started=await waitFor(()=>{
+        const p=readRosterFromPage();
+        const d=p.parsed||{};
+        return d.pick===1 && p.occupied===0 ? {page:p,parsed:d}:null;
+      },6500,140);
+
+      if(!started){
+        if(status)status.textContent="Start Game нажат, но Draft Pick 1/6 не появился.";
+        return false;
+      }
+
+      lastPageSignature="";
+      autoPendingKey="";
+      roster={};
+      await storageSet({nflpLiveRoster:roster});
+      try{sessionStorage.removeItem("__nflp_floor_reload__")}catch{}
+      if(status)status.textContent="Start Game ✓ · Draft Pick 1/6 запущен";
+      syncFromNFLPerryPage(false);
+      setTimeout(()=>enforcePotentialFloor("start"),90);
+      if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),350);
+      return true;
+    }catch(err){
+      if(status)status.textContent=`Start Game: ${err?.message||err}`;
+      return false;
+    }finally{
+      setTimeout(()=>{startGameBusy=false},350);
+    }
+  }
+
   function restartButtonCandidates(){
     const exact=[
       "play again","restart","restart game","new game","start new game",
@@ -1211,13 +1284,15 @@
         candidate.el.click();
         if(status)status.textContent=`Нажал "${candidate.text}". Жду новую игру…`;
 
-        const started=await waitFor(()=>{
+        const nextState=await waitFor(()=>{
           const parsed=parsePageStateFromLines(pageLines());
           const p=readRosterFromPage();
-          return parsed.pick===1 && p.occupied===0;
+          if(parsed.pick===1 && p.occupied===0)return "draft";
+          if(!parsed.pick && p.occupied===0 && startGameButtonCandidates().length)return "start-screen";
+          return null;
         },6000,160);
 
-        if(started){
+        if(nextState==="draft"){
           lastPageSignature="";
           autoPendingKey="";
           try{sessionStorage.removeItem("__nflp_floor_reload__")}catch{}
@@ -1225,6 +1300,12 @@
           syncFromNFLPerryPage(false);
           if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),450);
           return true;
+        }
+        if(nextState==="start-screen"){
+          restartBusy=false;
+          thresholdRestartBusy=false;
+          const ok=await maybeAutoStartGame("после перезапуска");
+          return ok;
         }
       }
 
@@ -1298,6 +1379,10 @@
     const page=readRosterFromPage();
     const parsed=page.parsed||{};
     const clean=cleanRosterForOptimizer(page.roster);
+
+    if(!parsed.pick && page.occupied===0 && continuousAutomationWanted()){
+      setTimeout(()=>maybeAutoStartGame("автопродолжение после перезапуска"),60);
+    }
 
     renderThresholdControls();
 
@@ -1433,6 +1518,7 @@
     await reloadPlayers(false);
     renderStats();
     syncFromNFLPerryPage(false);
+    setTimeout(()=>maybeAutoStartGame("старт страницы"),180);
     try{
       const p=readRosterFromPage();
       const parsed=p.parsed||{};
@@ -1447,7 +1533,10 @@
     // The extension panel is a direct child of <html>, while NFLPerry lives in <body>.
     // Observe only the site so changing our own controls never triggers a sync/re-render.
     if(document.body)obs.observe(document.body,{subtree:true,childList:true,characterData:true});
-    setInterval(()=>syncFromNFLPerryPage(false),1800);
+    setInterval(()=>{
+      syncFromNFLPerryPage(false);
+      maybeAutoStartGame("автопроверка");
+    },1800);
   }
 
   init().catch(err=>{
