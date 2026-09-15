@@ -9,7 +9,9 @@
   let roster={}, currentTeam="SAS", autoCapture=true;
   let pageSync=true, lastPageSignature="";
   let autoDraft=false, autoStrategy="potential", autoDelay=900;
+  let autoRestart=false, restartBusy=false;
   let autoBusy=false, autoTimer=null, autoPendingKey="", autoRunToken=0;
+  let gameHistory=[], lastRecordedGameSig="";
   let worker=null, workerReady=false, reqSeq=0, activeStateReq=0, activeCandReq=0;
   let stateAnalysis=null, candidateAnalysis=new Map();
   let root, panel, statusEl;
@@ -28,7 +30,8 @@
   async function storageGet(){
     return new Promise(resolve=>chrome.storage.local.get([
       "nflpLiveRoster","nflpLiveTeam","nflpAutoCapture","nflpPageSync",
-      "nflpAutoDraft","nflpAutoStrategy","nflpAutoDelay"
+      "nflpAutoDraft","nflpAutoStrategy","nflpAutoDelay","nflpAutoRestart",
+      "nflpGameHistory"
     ],resolve));
   }
   async function storageSet(obj){ return new Promise(resolve=>chrome.storage.local.set(obj,resolve)); }
@@ -77,95 +80,130 @@
           <button class="nflp-iconbtn" id="nflp-refresh">↻ API</button>
           <button class="nflp-iconbtn" id="nflp-close">✕</button>
         </div>
+
+        <div class="nflp-tabs">
+          <button class="nflp-tab active" data-tab="assistant">Ассистент</button>
+          <button class="nflp-tab" data-tab="stats">Статистика</button>
+        </div>
+
         <div class="nflp-body">
-          <div class="nflp-kpis">
-            <div class="nflp-kpi big">
-              <div class="label">Потенциальный максимум</div>
-              <div class="value" id="nflp-potential">—</div>
-              <div class="meta" id="nflp-potential-meta">точный математический потолок</div>
+          <div id="nflp-tab-assistant">
+            <div class="nflp-kpis">
+              <div class="nflp-kpi big">
+                <div class="label">Потенциальный максимум</div>
+                <div class="value" id="nflp-potential">—</div>
+                <div class="meta" id="nflp-potential-meta">точный математический потолок</div>
+              </div>
+              <div class="nflp-kpi">
+                <div class="label">Expected итог</div>
+                <div class="value" id="nflp-expected">—</div>
+                <div class="meta" id="nflp-exp-meta">ожидание будущих дроу</div>
+              </div>
+              <div class="nflp-kpi">
+                <div class="label">Шанс 295+</div>
+                <div class="value" id="nflp-p295">—</div>
+                <div class="meta" id="nflp-prob-meta">расчёт…</div>
+              </div>
             </div>
-            <div class="nflp-kpi">
-              <div class="label">Expected итог</div>
-              <div class="value" id="nflp-expected">—</div>
-              <div class="meta" id="nflp-exp-meta">ожидание будущих дроу</div>
-            </div>
-            <div class="nflp-kpi">
-              <div class="label">Шанс 295+</div>
-              <div class="value" id="nflp-p295">—</div>
-              <div class="meta" id="nflp-prob-meta">расчёт…</div>
-            </div>
-          </div>
 
-          <div class="nflp-row">
-            <div class="nflp-field">
-              <label class="nflp-label">Текущая команда (читается со страницы)</label>
-              <select id="nflp-team" class="nflp-select"></select>
-            </div>
-            <button class="nflp-btn" id="nflp-detect">Авто</button>
-          </div>
-          <div id="nflp-detect-status" class="nflp-status">Автоопределение включено как подсказка; при ошибке выбери команду вручную.</div>
-
-          <div class="nflp-section nflp-auto-box">
-            <div class="nflp-section-title">
-              <span>Auto Draft</span>
-              <button class="nflp-btn nflp-auto-toggle" id="nflp-autodraft-toggle">AUTO OFF</button>
-            </div>
-            <div class="nflp-row" style="margin-top:8px">
+            <div class="nflp-row">
               <div class="nflp-field">
-                <label class="nflp-label" style="margin-top:0">Стратегия</label>
-                <select id="nflp-autostrategy" class="nflp-select">
-                  <option value="potential">POTENTIAL — потолок</option>
-                  <option value="expected">EXPECTED — средний итог</option>
-                  <option value="p295">295+ — шанс ≥295</option>
-                </select>
+                <label class="nflp-label">Текущая команда (читается со страницы)</label>
+                <select id="nflp-team" class="nflp-select"></select>
               </div>
-              <div class="nflp-field" style="max-width:112px">
-                <label class="nflp-label" style="margin-top:0">Задержка</label>
-                <select id="nflp-autodelay" class="nflp-select">
-                  <option value="500">0.5 сек</option>
-                  <option value="900">0.9 сек</option>
-                  <option value="1500">1.5 сек</option>
-                  <option value="2500">2.5 сек</option>
-                </select>
+              <button class="nflp-btn" id="nflp-detect">Авто</button>
+            </div>
+            <div id="nflp-detect-status" class="nflp-status">PAGE SYNC включён.</div>
+
+            <div class="nflp-section nflp-auto-box">
+              <div class="nflp-section-title">
+                <span>Auto Draft</span>
+                <button class="nflp-btn nflp-auto-toggle" id="nflp-autodraft-toggle">AUTO OFF</button>
               </div>
+
+              <div class="nflp-row" style="margin-top:8px">
+                <div class="nflp-field">
+                  <label class="nflp-label" style="margin-top:0">Стратегия</label>
+                  <select id="nflp-autostrategy" class="nflp-select">
+                    <option value="potential">POTENTIAL — потолок</option>
+                    <option value="expected">EXPECTED — средний итог</option>
+                    <option value="p295">295+ — шанс ≥295</option>
+                  </select>
+                </div>
+                <div class="nflp-field" style="max-width:112px">
+                  <label class="nflp-label" style="margin-top:0">Задержка</label>
+                  <select id="nflp-autodelay" class="nflp-select">
+                    <option value="500">0.5 сек</option>
+                    <option value="900">0.9 сек</option>
+                    <option value="1500">1.5 сек</option>
+                    <option value="2500">2.5 сек</option>
+                  </select>
+                </div>
+              </div>
+
+              <label class="nflp-check">
+                <input type="checkbox" id="nflp-autorestart">
+                После 6/6 автоматически начать новую игру
+              </label>
+
+              <div class="nflp-status" id="nflp-auto-status">Auto Draft выключен.</div>
+              <div class="nflp-status" id="nflp-restart-status"></div>
             </div>
-            <div class="nflp-status" id="nflp-auto-status">Выключен. Включи AUTO, чтобы расширение само выбирало игрока на NFLPerry.</div>
-          </div>
 
-          <div class="nflp-section">
-            <div class="nflp-section-title">
-              <span>Лучший пик сейчас</span>
-              <button class="nflp-btn" id="nflp-analyze">Пересчитать</button>
+            <div class="nflp-section">
+              <div class="nflp-section-title">
+                <span>Лучший пик сейчас</span>
+                <button class="nflp-btn" id="nflp-analyze">Пересчитать</button>
+              </div>
+              <div class="nflp-strategy" id="nflp-strategy"></div>
+              <div class="nflp-rec" id="nflp-rec"></div>
             </div>
-            <div class="nflp-strategy" id="nflp-strategy"></div>
-            <div class="nflp-rec" id="nflp-rec"></div>
-          </div>
 
-          <div class="nflp-section">
-            <div class="nflp-section-title">
-              <span>Текущий состав</span>
-              <button class="nflp-btn" id="nflp-reset">Очистить</button>
+            <div class="nflp-section">
+              <div class="nflp-section-title">
+                <span>Текущий состав</span>
+                <button class="nflp-btn" id="nflp-reset">Очистить</button>
+              </div>
+              <div class="nflp-roster" id="nflp-roster"></div>
             </div>
-            <div class="nflp-roster" id="nflp-roster"></div>
+
+            <div class="nflp-section">
+              <label class="nflp-check">
+                <input type="checkbox" id="nflp-pagesync" checked>
+                Синхронизировать состав и текущую команду со страницы NFLPerry
+              </label>
+              <label class="nflp-check" style="margin-top:7px">
+                <input type="checkbox" id="nflp-autocap">
+                Дополнительная фиксация по клику на имя игрока
+              </label>
+              <div class="nflp-status" id="nflp-status"></div>
+            </div>
+
+            <div class="nflp-foot">
+              <b>AUTO DRAFT</b> сам открывает слот, ищет игрока и подтверждает выбор по странице.<br>
+              <b>PAGE SYNC</b> использует NFLPerry как источник истины.<br>
+              POTENTIAL — максимальный потолок; EXPECTED — средний итог; 295+ — шанс закончить ≥295.
+            </div>
           </div>
 
-          <div class="nflp-section">
-            <label style="display:flex;gap:7px;align-items:center;font:800 10px system-ui;color:#9eacc0;cursor:pointer">
-              <input type="checkbox" id="nflp-pagesync" checked> Синхронизировать состав и текущую команду прямо со страницы NFLPerry
-            </label>
-            <label style="display:flex;gap:7px;align-items:center;font:800 10px system-ui;color:#9eacc0;cursor:pointer;margin-top:7px">
-              <input type="checkbox" id="nflp-autocap"> Дополнительная фиксация по клику на имя игрока
-            </label>
-            <div class="nflp-status" id="nflp-status"></div>
-          </div>
+          <div id="nflp-tab-stats" hidden>
+            <div class="nflp-stats-kpis">
+              <div><b id="nflp-games-count">0</b><span>игр</span></div>
+              <div><b id="nflp-games-best">—</b><span>лучший</span></div>
+              <div><b id="nflp-games-avg">—</b><span>средний</span></div>
+            </div>
 
-          <div class="nflp-foot">
-            <b>AUTO DRAFT</b> — при включении расширение само открывает нужный слот, ищет рекомендованного игрока и кликает его. После клика обязательно проверяет результат на странице.<br>
-            <b>PAGE SYNC</b> — NFLPerry является источником состава и текущего дроу.<br>
-            POTENTIAL — минимальная потеря математического потолка.<br>
-            EXPECTED — лучший средний итог по будущим случайным командам.<br>
-            295+ — максимальная вероятность закончить не ниже 295.<br>
-            На ранних пиках Expected/295+ считаются симуляцией; после 2 выбранных игроков — точным перебором оставшихся порядков.
+            <div class="nflp-section">
+              <div class="nflp-section-title">
+                <span>Top 10 результатов</span>
+                <button class="nflp-btn" id="nflp-clear-history">Очистить</button>
+              </div>
+              <div class="nflp-history" id="nflp-history"></div>
+            </div>
+
+            <div class="nflp-foot">
+              История сохраняется локально в Firefox. Хранятся все завершённые игры; здесь показываются 10 лучших результатов и их составы.
+            </div>
           </div>
         </div>
       </div>`;
@@ -216,6 +254,27 @@
       autoDelay=Math.max(300,+e.target.value||900);
       storageSet({nflpAutoDelay:autoDelay});
       renderAutoControls();
+    };
+    $("#nflp-autorestart",root).onchange=e=>{
+      autoRestart=e.target.checked;
+      storageSet({nflpAutoRestart:autoRestart});
+      renderAutoControls();
+    };
+
+    $$("[data-tab]",root).forEach(btn=>btn.onclick=()=>{
+      $$("[data-tab]",root).forEach(x=>x.classList.toggle("active",x===btn));
+      const tab=btn.dataset.tab;
+      $("#nflp-tab-assistant",root).hidden=tab!=="assistant";
+      $("#nflp-tab-stats",root).hidden=tab!=="stats";
+      if(tab==="stats")renderStats();
+    });
+
+    $("#nflp-clear-history",root).onclick=()=>{
+      if(!confirm("Очистить всю локальную историю игр?"))return;
+      gameHistory=[];
+      lastRecordedGameSig="";
+      storageSet({nflpGameHistory:gameHistory});
+      renderStats();
     };
   }
 
@@ -410,6 +469,8 @@
     }
     if(strategy)strategy.value=autoStrategy;
     if(delay)delay.value=String(autoDelay);
+    const ar=$("#nflp-autorestart",root);
+    if(ar)ar.checked=autoRestart;
   }
 
   function stopAutoDraft(message="Остановлено."){
@@ -721,14 +782,12 @@
       .trim().toLowerCase().replace(/\s+/g," ");
   }
 
-  // Read the actual NFLPerry page text while temporarily excluding our own overlay.
+  // IMPORTANT: our overlay is appended to <html>, not <body>.
+  // Reading document.body therefore already excludes the extension UI.
+  // Never hide/toggle the panel here: Firefox closes an open <select>
+  // when one of its ancestors becomes display:none.
   function rawNFLPerryText(){
-    if(!document.body) return "";
-    const oldDisplay=root?.style?.display||"";
-    if(root) root.style.display="none";
-    const text=document.body.innerText||"";
-    if(root) root.style.display=oldDisplay;
-    return text;
+    return document.body?.innerText || "";
   }
 
   function pageLines(){
@@ -898,12 +957,170 @@
     return clean;
   }
 
+
+  function scoreFromPage(){
+    const lines=pageLines();
+    for(const line of lines){
+      const m=line.match(/YOUR\s+SCORE\s*:\s*(\d+(?:\.\d+)?)/i);
+      if(m)return +m[1];
+    }
+    return null;
+  }
+
+  function completedGameFromPage(page){
+    if(!page || page.occupied!==6 || page.matched!==6)return null;
+    const score=scoreFromPage();
+    if(!Number.isFinite(score))return null;
+
+    const lineup=NBA.SLOT_ORDER.map(slot=>{
+      const r=page.roster?.[slot];
+      return r ? {
+        slot,
+        id:r.id||"",
+        name:r.name,
+        team:r.team,
+        fpts:+r.fpts||0
+      } : null;
+    }).filter(Boolean);
+
+    if(lineup.length!==6)return null;
+    const sig=`${score.toFixed(1)}|`+lineup.map(x=>`${x.slot}:${x.id||x.name}:${x.team}:${x.fpts}`).join("|");
+    return {sig,score,lineup,finishedAt:Date.now()};
+  }
+
+  function maybeRecordCompletedGame(page){
+    const game=completedGameFromPage(page);
+    if(!game || game.sig===lastRecordedGameSig)return false;
+    if(gameHistory.some(g=>g.sig===game.sig)){
+      lastRecordedGameSig=game.sig;
+      return false;
+    }
+
+    lastRecordedGameSig=game.sig;
+    gameHistory.push(game);
+    // Keep a generous local archive but avoid unlimited growth.
+    if(gameHistory.length>1000)gameHistory=gameHistory.slice(-1000);
+    storageSet({nflpGameHistory:gameHistory});
+    renderStats();
+    toast(`Игра сохранена: ${game.score.toFixed(1)} · место в истории #${gameHistory.length}`);
+    return true;
+  }
+
+  function renderStats(){
+    const count=$("#nflp-games-count",root);
+    if(!count)return;
+
+    const scores=gameHistory.map(g=>+g.score).filter(Number.isFinite);
+    count.textContent=String(gameHistory.length);
+    $("#nflp-games-best",root).textContent=scores.length?Math.max(...scores).toFixed(1):"—";
+    $("#nflp-games-avg",root).textContent=scores.length?(scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(1):"—";
+
+    const top=[...gameHistory]
+      .sort((a,b)=>(+b.score)-(+a.score) || (+b.finishedAt)-(+a.finishedAt))
+      .slice(0,10);
+
+    const el=$("#nflp-history",root);
+    if(!top.length){
+      el.innerHTML=`<div class="nflp-status">Пока нет завершённых игр. После состава 6/6 результат сохранится автоматически.</div>`;
+      return;
+    }
+
+    el.innerHTML=top.map((g,i)=>`
+      <details class="nflp-history-game" ${i===0?"open":""}>
+        <summary>
+          <span class="nflp-history-rank">#${i+1}</span>
+          <b>${(+g.score).toFixed(1)}</b>
+          <span>${new Date(g.finishedAt||Date.now()).toLocaleString()}</span>
+        </summary>
+        <div class="nflp-history-lineup">
+          ${(g.lineup||[]).map(x=>`
+            <div>
+              <strong>${esc(x.slot)}</strong>
+              <span>${esc(x.name)} <small>${esc(x.team)}</small></span>
+              <b>${(+x.fpts).toFixed(1)}</b>
+            </div>`).join("")}
+        </div>
+      </details>`).join("");
+  }
+
+  function restartButtonCandidates(){
+    const exact=[
+      "play again","restart","restart game","new game","start new game",
+      "new draft","draft again","try again","play another game"
+    ];
+    const nodes=[...document.querySelectorAll("button,a,[role='button']")]
+      .filter(el=>!root.contains(el)&&visible(el));
+
+    return nodes.map(el=>{
+      const text=normText(el.innerText||el.textContent||"").toLowerCase();
+      const compact=text.replace(/[!?.]+$/,"").trim();
+      let score=-1;
+      const idx=exact.indexOf(compact);
+      if(idx>=0)score=100-idx;
+      else if(/play\s+again|restart\s+game|new\s+game|new\s+draft/i.test(compact))score=50;
+      return {el,text,score};
+    }).filter(x=>x.score>=0).sort((a,b)=>b.score-a.score);
+  }
+
+  async function maybeAutoRestart(page){
+    if(!autoRestart || restartBusy)return;
+    const game=completedGameFromPage(page);
+    if(!game)return;
+
+    restartBusy=true;
+    const status=$("#nflp-restart-status",root);
+    if(status)status.textContent="6/6 завершено. Ищу кнопку новой игры…";
+
+    try{
+      const candidate=await waitFor(()=>{
+        const list=restartButtonCandidates();
+        return list.length===1 ? list[0] : (list.length>1 && list[0].score>list[1].score ? list[0] : null);
+      },8000,200);
+
+      if(!candidate){
+        if(status)status.textContent="Автоперезапуск: кнопка новой игры не распознана. Пришли скрин финального экрана.";
+        restartBusy=false;
+        return;
+      }
+
+      await sleep(650);
+      candidate.el.scrollIntoView({block:"center",behavior:"auto"});
+      candidate.el.click();
+      if(status)status.textContent=`Нажал "${candidate.text}". Жду Draft Pick 1/6…`;
+
+      const started=await waitFor(()=>{
+        const parsed=parsePageStateFromLines(pageLines());
+        const p=readRosterFromPage();
+        return parsed.pick===1 && p.occupied===0;
+      },7000,180);
+
+      if(started){
+        lastPageSignature="";
+        autoPendingKey="";
+        if(status)status.textContent="Новая игра запущена ✓";
+        syncFromNFLPerryPage(false);
+        if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),500);
+      }else{
+        if(status)status.textContent="Кнопка нажата, но новая игра не подтверждена.";
+      }
+    }catch(err){
+      if(status)status.textContent=`Автоперезапуск: ${err?.message||err}`;
+    }finally{
+      restartBusy=false;
+    }
+  }
+
   function syncFromNFLPerryPage(showToast=false){
     if(!pageSync || !model)return false;
 
     const page=readRosterFromPage();
     const parsed=page.parsed||{};
     const clean=cleanRosterForOptimizer(page.roster);
+
+    if(page.occupied===6 && page.matched===6){
+      maybeRecordCompletedGame(page);
+      setTimeout(()=>maybeAutoRestart(page),100);
+    }
 
     const sig=JSON.stringify({
       t:parsed.team||null,
@@ -1006,14 +1223,18 @@
     currentTeam=NBA.ACTIVE_TEAMS.includes(saved.nflpLiveTeam)?saved.nflpLiveTeam:"SAS";
     autoCapture=saved.nflpAutoCapture===true;
     pageSync=saved.nflpPageSync!==false;
-    // Safety: Auto Draft always starts OFF after extension/page reload.
-    autoDraft=false;
-    storageSet({nflpAutoDraft:false});
+    // Default is OFF. In explicit continuous mode (Auto Restart enabled),
+    // preserve Auto Draft across a page reload/navigation.
+    autoRestart=saved.nflpAutoRestart===true;
+    autoDraft=autoRestart && saved.nflpAutoDraft===true;
+    if(!autoRestart)storageSet({nflpAutoDraft:false});
     autoStrategy=["potential","expected","p295"].includes(saved.nflpAutoStrategy)?saved.nflpAutoStrategy:"potential";
     autoDelay=[500,900,1500,2500].includes(+saved.nflpAutoDelay)?+saved.nflpAutoDelay:900;
+    gameHistory=Array.isArray(saved.nflpGameHistory)?saved.nflpGameHistory:[];
     initTeamOptions();
     installClickCapture();
     await reloadPlayers(false);
+    renderStats();
     syncFromNFLPerryPage(false);
 
     let timer=null;
@@ -1021,7 +1242,9 @@
       clearTimeout(timer);
       timer=setTimeout(()=>syncFromNFLPerryPage(false),220);
     });
-    obs.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
+    // The extension panel is a direct child of <html>, while NFLPerry lives in <body>.
+    // Observe only the site so changing our own controls never triggers a sync/re-render.
+    if(document.body)obs.observe(document.body,{subtree:true,childList:true,characterData:true});
     setInterval(()=>syncFromNFLPerryPage(false),1800);
   }
 

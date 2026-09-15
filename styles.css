@@ -63,3 +63,25 @@
 .nflp-auto-box{border:1px solid #66462f;border-radius:13px;padding:10px;background:linear-gradient(135deg,#3b231422,#0f1722)}
 .nflp-auto-toggle{min-width:92px}
 .nflp-auto-toggle.green{background:linear-gradient(135deg,#176b4e,#1f8a64)!important;border-color:#43b98d!important;color:#eafff6!important;box-shadow:0 0 0 1px #43b98d22 inset}
+
+.nflp-tabs{display:flex;gap:6px;padding:0 14px 10px;background:#121b28}
+.nflp-tab{all:unset;cursor:pointer;flex:1;text-align:center;padding:8px 10px;border:1px solid #324057;border-radius:10px;color:#8fa0b7;font:900 11px system-ui;background:#0e1621}
+.nflp-tab.active{color:#fff;border-color:#d16f34;background:#42281a}
+.nflp-check{display:flex;gap:7px;align-items:center;font:800 10px system-ui;color:#9eacc0;cursor:pointer;margin-top:9px}
+.nflp-stats-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:4px}
+.nflp-stats-kpis>div{border:1px solid #314056;border-radius:11px;padding:10px;text-align:center;background:#101925}
+.nflp-stats-kpis b{display:block;font-size:21px;color:#ffd0a6}
+.nflp-stats-kpis span{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:#7e8da3;margin-top:3px}
+.nflp-history{display:grid;gap:7px;margin-top:8px}
+.nflp-history-game{border:1px solid #303e53;border-radius:11px;background:#0f1722;overflow:hidden}
+.nflp-history-game summary{cursor:pointer;list-style:none;display:grid;grid-template-columns:32px 64px 1fr;gap:8px;align-items:center;padding:9px 10px}
+.nflp-history-game summary::-webkit-details-marker{display:none}
+.nflp-history-game summary b{font-size:17px;color:#ffd0a6}
+.nflp-history-game summary span:last-child{font-size:9px;color:#77879d;text-align:right}
+.nflp-history-rank{font-weight:950;color:#8294ad}
+.nflp-history-lineup{border-top:1px solid #273449;padding:6px 9px 9px;display:grid;gap:4px}
+.nflp-history-lineup>div{display:grid;grid-template-columns:36px 1fr 42px;gap:6px;align-items:center;font:800 10px system-ui}
+.nflp-history-lineup strong{color:#9dadff}
+.nflp-history-lineup span{color:#dbe5f2}
+.nflp-history-lineup small{color:#76879e;margin-left:4px}
+.nflp-history-lineup b{text-align:right;color:#ffd0a6}
