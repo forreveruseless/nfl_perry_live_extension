@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "NFLPerry NBA Live Assistant (Firefox) — Auto Sync V4",
-  "version": "1.2.0",
-  "description": "Automatic NFLPerry page sync + live potential, expected finish and 295+ chance.",
+  "name": "NFLPerry NBA Live Assistant (Firefox) — Auto Draft V5",
+  "version": "1.3.0",
+  "description": "Auto-sync + optional Auto Draft for NFLPerry NBA, with Potential / Expected / 295+ strategies.",
   "permissions": [
     "storage",
     "https://api.nflperry.com/*",

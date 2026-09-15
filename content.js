@@ -8,6 +8,8 @@
   let players=[], model=null, source="loading";
   let roster={}, currentTeam="SAS", autoCapture=true;
   let pageSync=true, lastPageSignature="";
+  let autoDraft=false, autoStrategy="potential", autoDelay=900;
+  let autoBusy=false, autoTimer=null, autoPendingKey="", autoRunToken=0;
   let worker=null, workerReady=false, reqSeq=0, activeStateReq=0, activeCandReq=0;
   let stateAnalysis=null, candidateAnalysis=new Map();
   let root, panel, statusEl;
@@ -24,7 +26,10 @@
   }
 
   async function storageGet(){
-    return new Promise(resolve=>chrome.storage.local.get(["nflpLiveRoster","nflpLiveTeam","nflpAutoCapture","nflpPageSync"],resolve));
+    return new Promise(resolve=>chrome.storage.local.get([
+      "nflpLiveRoster","nflpLiveTeam","nflpAutoCapture","nflpPageSync",
+      "nflpAutoDraft","nflpAutoStrategy","nflpAutoDelay"
+    ],resolve));
   }
   async function storageSet(obj){ return new Promise(resolve=>chrome.storage.local.set(obj,resolve)); }
 
@@ -100,6 +105,33 @@
           </div>
           <div id="nflp-detect-status" class="nflp-status">Автоопределение включено как подсказка; при ошибке выбери команду вручную.</div>
 
+          <div class="nflp-section nflp-auto-box">
+            <div class="nflp-section-title">
+              <span>Auto Draft</span>
+              <button class="nflp-btn nflp-auto-toggle" id="nflp-autodraft-toggle">AUTO OFF</button>
+            </div>
+            <div class="nflp-row" style="margin-top:8px">
+              <div class="nflp-field">
+                <label class="nflp-label" style="margin-top:0">Стратегия</label>
+                <select id="nflp-autostrategy" class="nflp-select">
+                  <option value="potential">POTENTIAL — потолок</option>
+                  <option value="expected">EXPECTED — средний итог</option>
+                  <option value="p295">295+ — шанс ≥295</option>
+                </select>
+              </div>
+              <div class="nflp-field" style="max-width:112px">
+                <label class="nflp-label" style="margin-top:0">Задержка</label>
+                <select id="nflp-autodelay" class="nflp-select">
+                  <option value="500">0.5 сек</option>
+                  <option value="900">0.9 сек</option>
+                  <option value="1500">1.5 сек</option>
+                  <option value="2500">2.5 сек</option>
+                </select>
+              </div>
+            </div>
+            <div class="nflp-status" id="nflp-auto-status">Выключен. Включи AUTO, чтобы расширение само выбирало игрока на NFLPerry.</div>
+          </div>
+
           <div class="nflp-section">
             <div class="nflp-section-title">
               <span>Лучший пик сейчас</span>
@@ -128,7 +160,8 @@
           </div>
 
           <div class="nflp-foot">
-            <b>PAGE SYNC</b> — основной режим: NFLPerry сам является источником состава и текущего дроу.<br>
+            <b>AUTO DRAFT</b> — при включении расширение само открывает нужный слот, ищет рекомендованного игрока и кликает его. После клика обязательно проверяет результат на странице.<br>
+            <b>PAGE SYNC</b> — NFLPerry является источником состава и текущего дроу.<br>
             POTENTIAL — минимальная потеря математического потолка.<br>
             EXPECTED — лучший средний итог по будущим случайным командам.<br>
             295+ — максимальная вероятность закончить не ниже 295.<br>
@@ -144,8 +177,18 @@
     $("#nflp-close",root).onclick=()=>root.classList.remove("open");
     $("#nflp-refresh",root).onclick=()=>reloadPlayers(true);
     $("#nflp-detect",root).onclick=()=>{ const t=detectTeamFromPage(true); if(!t) toast("Команда автоматически не найдена — выбери вручную."); };
-    $("#nflp-team",root).onchange=e=>{ currentTeam=e.target.value; storageSet({nflpLiveTeam:currentTeam}); renderRecommendations(); analyzeCandidates(); };
-    $("#nflp-reset",root).onclick=()=>{ roster={}; storageSet({nflpLiveRoster:roster}); renderAll(); analyzeState(); analyzeCandidates(); };
+    $("#nflp-team",root).onchange=e=>{
+      currentTeam=e.target.value;
+      storageSet({nflpLiveTeam:currentTeam});
+      stopAutoDraft("Команда изменена вручную.");
+      renderRecommendations(); analyzeCandidates();
+      if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),180);
+    };
+    $("#nflp-reset",root).onclick=()=>{
+      stopAutoDraft("Состав очищен.");
+      roster={}; storageSet({nflpLiveRoster:roster});
+      renderAll(); analyzeState(); analyzeCandidates();
+    };
     $("#nflp-analyze",root).onclick=()=>{ analyzeState(); analyzeCandidates(); };
     $("#nflp-pagesync",root).onchange=e=>{
       pageSync=e.target.checked;
@@ -153,6 +196,27 @@
       if(pageSync) syncFromNFLPerryPage(true);
     };
     $("#nflp-autocap",root).onchange=e=>{ autoCapture=e.target.checked; storageSet({nflpAutoCapture:autoCapture}); };
+
+    $("#nflp-autodraft-toggle",root).onclick=()=>{
+      autoDraft=!autoDraft;
+      storageSet({nflpAutoDraft:autoDraft});
+      if(!autoDraft) stopAutoDraft("Auto Draft выключен.");
+      renderAutoControls();
+      if(autoDraft) maybeScheduleAutoDraft();
+    };
+    $("#nflp-autostrategy",root).onchange=e=>{
+      autoStrategy=e.target.value;
+      storageSet({nflpAutoStrategy:autoStrategy});
+      stopAutoDraft("Стратегия изменена — пересчитываю.");
+      renderAutoControls();
+      analyzeCandidates();
+      setTimeout(()=>maybeScheduleAutoDraft(),150);
+    };
+    $("#nflp-autodelay",root).onchange=e=>{
+      autoDelay=Math.max(300,+e.target.value||900);
+      storageSet({nflpAutoDelay:autoDelay});
+      renderAutoControls();
+    };
   }
 
   function setStatus(msg,kind=""){
@@ -188,6 +252,7 @@
           candidateAnalysis.clear();
           for(const x of m.results) candidateAnalysis.set(x.index,x);
           renderRecommendations();
+          maybeScheduleAutoDraft();
         }
       };
       worker.onerror=e=>{
@@ -327,6 +392,288 @@
     renderAll(); analyzeState(); analyzeCandidates();
   }
 
+
+  function setAutoStatus(msg,kind=""){
+    const el=$("#nflp-auto-status",root);
+    if(!el)return;
+    el.className=`nflp-status ${kind}`;
+    el.textContent=msg;
+  }
+
+  function renderAutoControls(){
+    const btn=$("#nflp-autodraft-toggle",root);
+    const strategy=$("#nflp-autostrategy",root);
+    const delay=$("#nflp-autodelay",root);
+    if(btn){
+      btn.textContent=autoDraft?"■ AUTO ON":"▶ AUTO OFF";
+      btn.classList.toggle("green",autoDraft);
+    }
+    if(strategy)strategy.value=autoStrategy;
+    if(delay)delay.value=String(autoDelay);
+  }
+
+  function stopAutoDraft(message="Остановлено."){
+    autoRunToken++;
+    autoBusy=false;
+    autoPendingKey="";
+    if(autoTimer){clearTimeout(autoTimer);autoTimer=null}
+    setAutoStatus(message,autoDraft?"":"");
+  }
+
+  function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+
+  function currentPageSnapshot(){
+    const page=readRosterFromPage();
+    return {
+      page,
+      parsed:page.parsed||{},
+      occupied:page.occupied||0,
+      matched:page.matched||0
+    };
+  }
+
+  function chosenCandidateForStrategy(){
+    if(!model)return null;
+    const cands=NBA.candidatesForTeam(model,currentTeam,roster);
+    if(!cands.length)return null;
+    const names=strategyNames(cands);
+
+    if(autoStrategy==="potential") return names.pot||null;
+    if(autoStrategy==="expected") return names.exp||null;
+    if(autoStrategy==="p295") return names.p295||null;
+    return names.pot||null;
+  }
+
+  function strategyLabel(){
+    return autoStrategy==="potential"?"POTENTIAL":
+           autoStrategy==="expected"?"EXPECTED":"295+";
+  }
+
+  function clickableAncestor(el,maxDepth=7){
+    let cur=el;
+    for(let i=0;i<maxDepth && cur;i++,cur=cur.parentElement){
+      if(root?.contains(cur))return null;
+      const tag=cur.tagName;
+      const role=cur.getAttribute?.("role");
+      const tab=cur.getAttribute?.("tabindex");
+      const cursor=getComputedStyle(cur).cursor;
+      if(tag==="BUTTON"||tag==="A"||role==="button"||tab==="0"||cursor==="pointer")return cur;
+    }
+    return el;
+  }
+
+  function findSlotSelectTarget(slot){
+    const want=`select ${slot}`.toLowerCase();
+    const els=[...document.querySelectorAll("button,a,[role='button'],div,span,p")]
+      .filter(el=>!root.contains(el)&&visible(el));
+    const scored=[];
+    for(const el of els){
+      const txt=normText(el.innerText||el.textContent||"").toLowerCase();
+      if(!txt.includes(want))continue;
+      const r=el.getBoundingClientRect();
+      if(r.width<20||r.height<10||r.width>900||r.height>240)continue;
+      let score=0;
+      if(txt===`+ ${want}`||txt===want)score+=100;
+      if(txt.startsWith("+ select"))score+=40;
+      score-=Math.min(txt.length,300)/20;
+      score-=Math.min(r.width*r.height,200000)/100000;
+      scored.push({score,el});
+    }
+    scored.sort((a,b)=>b.score-a.score);
+    return scored.length?clickableAncestor(scored[0].el):null;
+  }
+
+  function findSearchInput(slot){
+    const inputs=[...document.querySelectorAll("input")].filter(el=>!root.contains(el)&&visible(el));
+    const exact=inputs.find(i=>normText(i.placeholder).toLowerCase()===`search ${slot.toLowerCase()}...`);
+    return exact||inputs.find(i=>normText(i.placeholder).toLowerCase().includes(`search ${slot.toLowerCase()}`))||
+           inputs.find(i=>normText(i.placeholder).toLowerCase().startsWith("search"));
+  }
+
+  function setNativeInputValue(input,value){
+    const desc=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value");
+    if(desc?.set)desc.set.call(input,value); else input.value=value;
+    input.dispatchEvent(new Event("input",{bubbles:true}));
+    input.dispatchEvent(new Event("change",{bubbles:true}));
+    input.dispatchEvent(new KeyboardEvent("keyup",{bubbles:true,key:"a"}));
+  }
+
+  function findPlayerChoiceTarget(playerName){
+    const target=normName(playerName);
+    const els=[...document.querySelectorAll("button,a,[role='button'],li,div,span,p")]
+      .filter(el=>!root.contains(el)&&visible(el));
+    const scored=[];
+
+    for(const el of els){
+      const raw=normText(el.innerText||el.textContent||"");
+      if(!raw||raw.length>240)continue;
+      const nt=normName(raw);
+      if(!nt.includes(target))continue;
+      const r=el.getBoundingClientRect();
+      if(r.width<20||r.height<10||r.height>180||r.width>800)continue;
+
+      let score=0;
+      if(nt===target)score+=120;
+      else if(nt.startsWith(target+" "))score+=95;
+      else score+=55;
+      if(/\((PG|SG|SF|PF|C|G|F)\)/i.test(raw))score+=15;
+      score-=raw.length/25;
+      score-=Math.min(r.width*r.height,150000)/100000;
+      scored.push({score,el,raw});
+    }
+    scored.sort((a,b)=>b.score-a.score);
+    if(!scored.length)return null;
+
+    // Prefer a compact clickable row around the exact name, but do not climb into the whole modal.
+    let cur=scored[0].el;
+    const baseText=target;
+    for(let i=0;i<5&&cur;i++,cur=cur.parentElement){
+      if(root.contains(cur))break;
+      const txt=normName(cur.innerText||cur.textContent||"");
+      const r=cur.getBoundingClientRect();
+      if(txt.includes(baseText) && r.height<=110 && r.width<=650){
+        const role=cur.getAttribute?.("role");
+        const tag=cur.tagName;
+        const cursor=getComputedStyle(cur).cursor;
+        if(tag==="BUTTON"||tag==="A"||role==="button"||cursor==="pointer")return cur;
+      }
+    }
+    return clickableAncestor(scored[0].el,4)||scored[0].el;
+  }
+
+  async function waitFor(fn,timeout=3000,step=70){
+    const end=Date.now()+timeout;
+    while(Date.now()<end){
+      try{
+        const v=fn();
+        if(v)return v;
+      }catch{}
+      await sleep(step);
+    }
+    return null;
+  }
+
+  function siteRosterContains(slot,playerName){
+    const page=readRosterFromPage();
+    const r=page.roster?.[slot];
+    if(!r)return false;
+    return normName(r.name)===normName(playerName);
+  }
+
+  async function executeAutoPick(candidate,token,expectedPick){
+    const playerName=NBA.fullName(candidate.player);
+    const label=`${playerName} → ${candidate.slot}`;
+
+    setAutoStatus(`${strategyLabel()}: открываю ${candidate.slot} для ${playerName}…`);
+
+    const selectTarget=findSlotSelectTarget(candidate.slot);
+    if(!selectTarget)throw new Error(`не нашёл кнопку "+ Select ${candidate.slot}"`);
+    selectTarget.scrollIntoView({block:"center",behavior:"auto"});
+    await sleep(120);
+    selectTarget.click();
+
+    const search=await waitFor(()=>findSearchInput(candidate.slot),2800,70);
+    if(!search)throw new Error(`не открылось окно выбора ${candidate.slot}`);
+
+    if(token!==autoRunToken||!autoDraft)throw new Error("остановлено");
+
+    search.focus();
+    setNativeInputValue(search,playerName);
+    await sleep(220);
+
+    const playerTarget=await waitFor(()=>findPlayerChoiceTarget(playerName),2600,80);
+    if(!playerTarget)throw new Error(`не нашёл ${playerName} в списке NFLPerry`);
+
+    setAutoStatus(`${strategyLabel()}: выбираю ${label}…`,"ok");
+    playerTarget.scrollIntoView({block:"nearest",behavior:"auto"});
+    await sleep(100);
+    playerTarget.click();
+
+    const confirmed=await waitFor(()=>{
+      if(siteRosterContains(candidate.slot,playerName))return true;
+      const info=detectCurrentTeamFromDraftText();
+      return info?.pick && expectedPick && info.pick>expectedPick ? true:false;
+    },4200,110);
+
+    if(!confirmed)throw new Error(`NFLPerry не подтвердил выбор ${playerName}`);
+
+    syncFromNFLPerryPage(false);
+    toast(`AUTO ✓ ${label}`);
+    setAutoStatus(`✓ ${label}. Жду следующий дроу…`,"ok");
+  }
+
+  function maybeScheduleAutoDraft(){
+    if(!autoDraft||autoBusy||!model||!pageSync)return;
+
+    const snap=currentPageSnapshot();
+    const parsed=snap.parsed;
+    if(!parsed.team||!parsed.pick)return;
+    if(parsed.team!==currentTeam)return;
+
+    // All already occupied rows must be recognized before clicking anything.
+    if(snap.occupied!==snap.matched){
+      setAutoStatus(`Пауза: распознано ${snap.matched}/${snap.occupied} выбранных игроков.`,"bad");
+      return;
+    }
+
+    const chosen=chosenCandidateForStrategy();
+    if(!chosen){
+      if(autoStrategy!=="potential" && candidateAnalysis.size===0){
+        setAutoStatus(`${strategyLabel()}: жду расчёт рекомендаций…`);
+      }else{
+        setAutoStatus("Нет безопасного автоматического выбора.","bad");
+      }
+      return;
+    }
+
+    const key=`${parsed.pick}|${parsed.team}|${autoStrategy}|${chosen.player._id}|${chosen.slot}`;
+    if(autoPendingKey===key)return;
+
+    // Ensure the target slot is still empty on the actual NFLPerry page.
+    const slotInfo=parsed.slots?.[chosen.slot];
+    if(slotInfo && slotInfo.empty===false){
+      setAutoStatus(`Пауза: ${chosen.slot} уже занят на странице.`,"bad");
+      return;
+    }
+
+    autoPendingKey=key;
+    const token=++autoRunToken;
+    setAutoStatus(`${strategyLabel()}: ${NBA.fullName(chosen.player)} → ${chosen.slot} через ${(autoDelay/1000).toFixed(1)} сек.`,"ok");
+
+    autoTimer=setTimeout(async()=>{
+      if(!autoDraft||token!==autoRunToken)return;
+      autoBusy=true;
+      try{
+        // Re-validate immediately before click.
+        syncFromNFLPerryPage(false);
+        const again=currentPageSnapshot();
+        if(again.parsed?.pick!==parsed.pick || again.parsed?.team!==parsed.team){
+          throw new Error("дроу уже изменился");
+        }
+        const latest=chosenCandidateForStrategy();
+        if(!latest || latest.player._id!==chosen.player._id || latest.slot!==chosen.slot){
+          throw new Error("рекомендация успела измениться");
+        }
+        await executeAutoPick(chosen,token,parsed.pick);
+      }catch(err){
+        if(String(err?.message||err)!=="остановлено"){
+          autoDraft=false;
+          storageSet({nflpAutoDraft:false});
+          renderAutoControls();
+          setAutoStatus(`AUTO STOP: ${err?.message||err}`,"bad");
+          toast(`Auto Draft остановлен: ${err?.message||err}`);
+        }
+      }finally{
+        autoBusy=false;
+        autoPendingKey="";
+        autoTimer=null;
+        if(autoDraft){
+          setTimeout(()=>{syncFromNFLPerryPage(false);maybeScheduleAutoDraft()},500);
+        }
+      }
+    },autoDelay);
+  }
+
   function analyzeState(){
     if(!workerReady||!model)return;
     stateAnalysis=null; renderKPIs();
@@ -353,6 +700,7 @@
     renderRecommendations();
     $("#nflp-pagesync",root).checked=pageSync;
     $("#nflp-autocap",root).checked=autoCapture;
+    renderAutoControls();
     $("#nflp-source",root).textContent=`База: ${source} · ${players.length} активных записей`;
   }
 
@@ -591,6 +939,7 @@
       analyzeState();
       analyzeCandidates();
       if(showToast) toast(`PAGE SYNC · ${parsed.team||"?"} · состав ${page.matched}/${page.occupied}`);
+      setTimeout(()=>maybeScheduleAutoDraft(),180);
     }
     return changed;
   }
@@ -657,6 +1006,11 @@
     currentTeam=NBA.ACTIVE_TEAMS.includes(saved.nflpLiveTeam)?saved.nflpLiveTeam:"SAS";
     autoCapture=saved.nflpAutoCapture===true;
     pageSync=saved.nflpPageSync!==false;
+    // Safety: Auto Draft always starts OFF after extension/page reload.
+    autoDraft=false;
+    storageSet({nflpAutoDraft:false});
+    autoStrategy=["potential","expected","p295"].includes(saved.nflpAutoStrategy)?saved.nflpAutoStrategy:"potential";
+    autoDelay=[500,900,1500,2500].includes(+saved.nflpAutoDelay)?+saved.nflpAutoDelay:900;
     initTeamOptions();
     installClickCapture();
     await reloadPlayers(false);
