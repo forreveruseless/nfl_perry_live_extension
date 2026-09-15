@@ -33,6 +33,13 @@
   function fullName(p){
     return `${p.firstName || ""} ${p.lastName || ""}`.trim();
   }
+  function playerKey(value){
+    const name = typeof value === "string" ? value : fullName(value || {});
+    return String(name)
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^\p{L}\p{N}]+/gu," ")
+      .trim().toLowerCase().replace(/\s+/g," ");
+  }
   function normalizePlayers(raw){
     return (Array.isArray(raw) ? raw : [])
       .filter(p => p && ACTIVE_TEAMS.includes(p.team) && Number.isFinite(+p.fpts))
@@ -61,31 +68,42 @@
 
     const teamIndex = Object.fromEntries(ACTIVE_TEAMS.map((t,i)=>[t,i]));
     const best = ACTIVE_TEAMS.map(()=>SLOT_ORDER.map(()=>null));
+    const cellCandidates = ACTIVE_TEAMS.map(()=>SLOT_ORDER.map(()=>[]));
+
     for(const t of ACTIVE_TEAMS){
       const ti = teamIndex[t];
-      for(const slot of SLOT_ORDER){
-        let bp = null;
+      for(let si=0;si<SLOT_ORDER.length;si++){
+        const slot=SLOT_ORDER[si];
+        const byIdentity=new Map();
         for(const p of byTeam.get(t)){
-          if(!eligible(p, slot)) continue;
-          if(!bp || p.fpts > bp.fpts) bp = p;
+          if(!eligible(p,slot))continue;
+          const key=playerKey(p);
+          if(!key)continue;
+          const prev=byIdentity.get(key);
+          if(!prev || p.fpts>prev.fpts)byIdentity.set(key,p);
         }
-        best[ti][SLOT_ORDER.indexOf(slot)] = bp;
+        const arr=[...byIdentity.values()].sort((a,b)=>b.fpts-a.fpts);
+        cellCandidates[ti][si]=arr;
+        best[ti][si]=arr[0]||null;
       }
     }
-    return {byTeam, teamIndex, best};
+    return {byTeam,teamIndex,best,cellCandidates};
   }
 
   function rosterMasks(roster, teamIndex){
-    let usedMask = 0, slotsMask = 0, total = 0;
-    for(let si=0; si<SLOT_ORDER.length; si++){
-      const r = roster?.[SLOT_ORDER[si]];
-      if(!r) continue;
-      const ti = teamIndex[r.team];
-      if(Number.isInteger(ti)) usedMask |= (1 << ti);
-      slotsMask |= (1 << si);
-      total += +r.fpts || 0;
+    let usedMask=0,slotsMask=0,total=0;
+    const usedPlayerKeys=[];
+    for(let si=0;si<SLOT_ORDER.length;si++){
+      const r=roster?.[SLOT_ORDER[si]];
+      if(!r)continue;
+      const ti=teamIndex[r.team];
+      if(Number.isInteger(ti))usedMask|=(1<<ti);
+      slotsMask|=(1<<si);
+      total+=+r.fpts||0;
+      const pk=playerKey(r.name||"");
+      if(pk&&!usedPlayerKeys.includes(pk))usedPlayerKeys.push(pk);
     }
-    return {usedMask, slotsMask, total};
+    return {usedMask,slotsMask,total,usedPlayerKeys};
   }
 
   function hungarianMax(matrix){
@@ -145,65 +163,124 @@
     return {score, assignment};
   }
 
-  function exactRemaining(model, usedMask, slotsMask){
+  function firstAllowed(model,ti,si,globalBanned,cellForbidden){
+    const arr=model.cellCandidates?.[ti]?.[si]||[];
+    for(const p of arr){
+      const pk=playerKey(p);
+      if(globalBanned.has(pk))continue;
+      if(cellForbidden?.has(pk))continue;
+      return p;
+    }
+    return null;
+  }
+
+  function exactRemaining(model, usedMask, slotsMask, bannedPlayerKeys=[]){
     const openSlots=[];
-    for(let si=0;si<6;si++) if(!(slotsMask & (1<<si))) openSlots.push(si);
-    if(!openSlots.length) return {score:0, picks:[]};
+    for(let si=0;si<6;si++)if(!(slotsMask&(1<<si)))openSlots.push(si);
+    if(!openSlots.length)return {score:0,picks:[]};
 
     const avail=[];
-    for(let ti=0;ti<ACTIVE_TEAMS.length;ti++) if(!(usedMask & (1<<ti))) avail.push(ti);
+    for(let ti=0;ti<ACTIVE_TEAMS.length;ti++)if(!(usedMask&(1<<ti)))avail.push(ti);
+    if(avail.length<openSlots.length)return {score:-Infinity,picks:[]};
 
-    const matrix = openSlots.map(si => avail.map(ti => {
-      const p = model.best[ti][si];
-      return p ? p.fpts : -Infinity;
-    }));
-    const h = hungarianMax(matrix);
-    if(!h) return {score:-Infinity, picks:[]};
+    const banned=new Set((bannedPlayerKeys||[]).filter(Boolean));
+    let bestSolution=null,nodes=0;
+    const MAX_NODES=12000;
 
-    const picks = openSlots.map((si,ri)=>{
-      const ti=avail[h.assignment[ri]];
-      const p=model.best[ti][si];
-      return {slot:SLOT_ORDER[si], team:ACTIVE_TEAMS[ti], player:p, fpts:p.fpts};
-    });
-    return {score:h.score, picks};
+    function addForbid(forbids,cell,key){
+      const next=new Map(forbids);
+      const set=new Set(forbids.get(cell)||[]);
+      set.add(key); next.set(cell,set);
+      return next;
+    }
+
+    function solve(forbids){
+      if(++nodes>MAX_NODES)return;
+      const selected=openSlots.map(()=>avail.map(()=>null));
+      const matrix=openSlots.map((si,ri)=>avail.map((ti,ci)=>{
+        const p=firstAllowed(model,ti,si,banned,forbids.get(`${si}:${ti}`));
+        selected[ri][ci]=p;
+        return p?+p.fpts:-Infinity;
+      }));
+
+      const h=hungarianMax(matrix);
+      if(!h)return;
+      if(bestSolution&&h.score<=bestSolution.score+1e-9)return;
+
+      const assigned=openSlots.map((si,ri)=>{
+        const ci=h.assignment[ri],ti=avail[ci],p=selected[ri][ci];
+        return {si,ti,p,pk:p?playerKey(p):""};
+      });
+      if(assigned.some(x=>!x.p))return;
+
+      const seen=new Map();
+      let conflict=null;
+      for(const a of assigned){
+        if(seen.has(a.pk)){conflict=[seen.get(a.pk),a];break}
+        seen.set(a.pk,a);
+      }
+
+      if(!conflict){
+        bestSolution={
+          score:h.score,
+          picks:assigned.map(a=>({
+            slot:SLOT_ORDER[a.si],team:ACTIVE_TEAMS[a.ti],
+            player:a.p,fpts:+a.p.fpts,playerKey:a.pk
+          }))
+        };
+        return;
+      }
+
+      const [a,b]=conflict;
+      solve(addForbid(forbids,`${a.si}:${a.ti}`,a.pk));
+      solve(addForbid(forbids,`${b.si}:${b.ti}`,b.pk));
+    }
+
+    solve(new Map());
+    return bestSolution||{score:-Infinity,picks:[]};
   }
 
   function exactCeiling(model, roster){
-    const {usedMask,slotsMask,total}=rosterMasks(roster, model.teamIndex);
-    const rem=exactRemaining(model,usedMask,slotsMask);
+    const {usedMask,slotsMask,total,usedPlayerKeys}=rosterMasks(roster,model.teamIndex);
+    const rem=exactRemaining(model,usedMask,slotsMask,usedPlayerKeys);
     return {
-      total: total + (Number.isFinite(rem.score)?rem.score:0),
-      lockedTotal: total,
-      remainingTotal: Number.isFinite(rem.score)?rem.score:0,
-      future: rem.picks
+      total:total+(Number.isFinite(rem.score)?rem.score:0),
+      lockedTotal:total,
+      remainingTotal:Number.isFinite(rem.score)?rem.score:0,
+      future:rem.picks
     };
   }
 
-  function candidatesForTeam(model, team, roster){
+  function candidatesForTeam(model,team,roster){
     const ti=model.teamIndex[team];
-    if(!Number.isInteger(ti)) return [];
-    const {usedMask,slotsMask,total}=rosterMasks(roster, model.teamIndex);
-    if(usedMask & (1<<ti)) return [];
+    if(!Number.isInteger(ti))return [];
+    const {usedMask,slotsMask,total,usedPlayerKeys}=rosterMasks(roster,model.teamIndex);
+    if(usedMask&(1<<ti))return [];
 
-    const current = exactCeiling(model, roster).total;
+    const banned=new Set(usedPlayerKeys);
+    const current=exactCeiling(model,roster).total;
     const out=[];
+
     for(let si=0;si<6;si++){
-      if(slotsMask & (1<<si)) continue;
-      const p=model.best[ti][si];
-      if(!p) continue;
-      const nUsed=usedMask|(1<<ti);
-      const nSlots=slotsMask|(1<<si);
-      const rem=exactRemaining(model,nUsed,nSlots);
+      if(slotsMask&(1<<si))continue;
+      const p=firstAllowed(model,ti,si,banned,null);
+      if(!p)continue;
+      const pk=playerKey(p);
+      const rem=exactRemaining(
+        model,
+        usedMask|(1<<ti),
+        slotsMask|(1<<si),
+        [...usedPlayerKeys,pk]
+      );
       const ceiling=total+p.fpts+(Number.isFinite(rem.score)?rem.score:0);
       out.push({
-        team, slot:SLOT_ORDER[si], slotIndex:si,
-        player:p, fpts:p.fpts, ceiling,
+        team,slot:SLOT_ORDER[si],slotIndex:si,
+        player:p,playerKey:pk,fpts:+p.fpts,ceiling,
         loss:current-ceiling
       });
     }
 
-    // Same player may be eligible at multiple slots, intentionally keep each slot as a separate strategy.
-    out.sort((a,b)=> b.ceiling-a.ceiling || b.fpts-a.fpts || a.slotIndex-b.slotIndex);
+    out.sort((a,b)=>b.ceiling-a.ceiling||b.fpts-a.fpts||a.slotIndex-b.slotIndex);
     return out;
   }
 
@@ -211,6 +288,6 @@
     TEAM_NAMES, ACTIVE_TEAMS, SLOT_ORDER,
     normalizePlayers, buildModel, rosterMasks,
     exactRemaining, exactCeiling, candidatesForTeam,
-    fullName, eligible
+    fullName, playerKey, eligible
   };
 })();

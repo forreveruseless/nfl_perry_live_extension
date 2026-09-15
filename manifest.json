@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "NFLPerry NBA Live Assistant (Firefox) — V8",
-  "version": "1.6.0",
-  "description": "Auto Draft + auto Start Game + potential-floor restart + Top-10 history.",
+  "name": "NFLPerry NBA Live Assistant (Firefox) — V9",
+  "version": "1.7.0",
+  "description": "Auto Draft with unique-player logic across eras/teams and automatic retry on draft errors.",
   "permissions": [
     "storage",
     "https://api.nflperry.com/*",

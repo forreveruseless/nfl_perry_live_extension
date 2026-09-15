@@ -348,12 +348,14 @@
       };
       worker.onerror=e=>{
         workerReady=false;
-        setStatus(`Расчётный модуль: ${e.message||"ошибка Worker"}`,"bad");
+        const msg=e.message||"ошибка Worker";
+        setStatus(`Расчётный модуль: ${msg}`,"bad");
+        if(autoDraft)startNewAttempt(`AUTO ERROR: расчётный модуль ${msg}`,{allowReloadFallback:true});
       };
-      const scores=NBA.ACTIVE_TEAMS.map((t,ti)=>NBA.SLOT_ORDER.map((s,si)=>{
-        const p=model.best[ti][si]; return p ? +p.fpts : -Infinity;
-      }));
-      worker.postMessage({type:"INIT",teams:NBA.ACTIVE_TEAMS,scores});
+      const workerCandidates=NBA.ACTIVE_TEAMS.map((t,ti)=>NBA.SLOT_ORDER.map((s,si)=>
+        (model.cellCandidates?.[ti]?.[si]||[]).map(p=>({score:+p.fpts,key:NBA.playerKey(p)}))
+      ));
+      worker.postMessage({type:"INIT",teams:NBA.ACTIVE_TEAMS,candidates:workerCandidates});
     }catch(err){
       workerReady=false;
       setStatus(`Potential работает, но Expected/295+ недоступны: ${err.message}`,"bad");
@@ -364,7 +366,7 @@
 
   function currentState(){
     const s=NBA.rosterMasks(roster,model.teamIndex);
-    return {usedMask:s.usedMask,slotsMask:s.slotsMask,total:s.total};
+    return {usedMask:s.usedMask,slotsMask:s.slotsMask,total:s.total,usedKeys:[...(s.usedPlayerKeys||[])]};
   }
 
   function renderKPIs(){
@@ -725,8 +727,25 @@
     return normName(r.name)===normName(playerName);
   }
 
+  function rosterPlayerKeys(){
+    return new Set(Object.values(roster||{}).filter(Boolean).map(r=>NBA.playerKey(r.name||"")).filter(Boolean));
+  }
+
+  function duplicateRosterPlayer(pageRoster){
+    const seen=new Map();
+    for(const slot of NBA.SLOT_ORDER){
+      const r=pageRoster?.[slot];if(!r)continue;
+      const pk=NBA.playerKey(r.name||"");if(!pk)continue;
+      if(seen.has(pk))return{player:r.name,firstSlot:seen.get(pk),secondSlot:slot};
+      seen.set(pk,slot);
+    }
+    return null;
+  }
+
   async function executeAutoPick(candidate,token,expectedPick){
     const playerName=NBA.fullName(candidate.player);
+    const pk=candidate.playerKey||NBA.playerKey(candidate.player);
+    if(rosterPlayerKeys().has(pk))throw new Error(`игрок ${playerName} уже есть в составе — повтор запрещён`);
     const label=`${playerName} → ${candidate.slot}`;
 
     setAutoStatus(`${strategyLabel()}: открываю ${candidate.slot} для ${playerName}…`);
@@ -777,7 +796,15 @@
 
     // All already occupied rows must be recognized before clicking anything.
     if(snap.occupied!==snap.matched){
-      setAutoStatus(`Пауза: распознано ${snap.matched}/${snap.occupied} выбранных игроков.`,"bad");
+      setAutoStatus(`Ошибка состава ${snap.matched}/${snap.occupied} — новая попытка…`,"bad");
+      startNewAttempt(`AUTO ERROR: состав распознан ${snap.matched}/${snap.occupied}`,{allowReloadFallback:true});
+      return;
+    }
+
+    const duplicate=duplicateRosterPlayer(snap.page?.roster||{});
+    if(duplicate){
+      setAutoStatus(`Повтор ${duplicate.player} — новая попытка…`,"bad");
+      startNewAttempt(`AUTO ERROR: один игрок выбран дважды (${duplicate.player})`,{allowReloadFallback:true});
       return;
     }
 
@@ -786,7 +813,8 @@
       if(autoStrategy!=="potential" && candidateAnalysis.size===0){
         setAutoStatus(`${strategyLabel()}: жду расчёт рекомендаций…`);
       }else{
-        setAutoStatus("Нет безопасного автоматического выбора.","bad");
+        setAutoStatus("Нет допустимого выбора без повторов — новая попытка…","bad");
+        startNewAttempt("AUTO ERROR: нет допустимого выбора без повторов",{allowReloadFallback:true});
       }
       return;
     }
@@ -804,7 +832,8 @@
     // Ensure the target slot is still empty on the actual NFLPerry page.
     const slotInfo=parsed.slots?.[chosen.slot];
     if(slotInfo && slotInfo.empty===false){
-      setAutoStatus(`Пауза: ${chosen.slot} уже занят на странице.`,"bad");
+      setAutoStatus(`Ошибка: ${chosen.slot} уже занят — новая попытка…`,"bad");
+      startNewAttempt(`AUTO ERROR: слот ${chosen.slot} неожиданно занят`,{allowReloadFallback:true});
       return;
     }
 
@@ -828,12 +857,11 @@
         }
         await executeAutoPick(chosen,token,parsed.pick);
       }catch(err){
-        if(String(err?.message||err)!=="остановлено"){
-          autoDraft=false;
-          storageSet({nflpAutoDraft:false});
-          renderAutoControls();
-          setAutoStatus(`AUTO STOP: ${err?.message||err}`,"bad");
-          toast(`Auto Draft остановлен: ${err?.message||err}`);
+        const msg=String(err?.message||err);
+        if(msg!=="остановлено"){
+          setAutoStatus(`AUTO ERROR: ${msg} → новая попытка…`,"bad");
+          toast(`Auto Draft: ${msg} — перезапуск`);
+          await startNewAttempt(`AUTO ERROR: ${msg}`,{allowReloadFallback:true});
         }
       }finally{
         autoBusy=false;
@@ -861,7 +889,10 @@
     activeCandReq=++reqSeq;
     worker.postMessage({
       type:"CANDIDATES",requestId:activeCandReq,state:currentState(),
-      candidates:cands.map(c=>({team:c.team,slotIndex:c.slotIndex,fpts:c.fpts}))
+      candidates:cands.map(c=>({
+        team:c.team,slotIndex:c.slotIndex,fpts:c.fpts,
+        playerKey:c.playerKey||NBA.playerKey(c.player)
+      }))
     });
   }
 
@@ -1379,6 +1410,12 @@
     const page=readRosterFromPage();
     const parsed=page.parsed||{};
     const clean=cleanRosterForOptimizer(page.roster);
+
+    const pageDuplicate=duplicateRosterPlayer(page.roster||{});
+    if(pageDuplicate && autoDraft && !restartBusy && !thresholdRestartBusy){
+      setAutoStatus(`Повтор игрока ${pageDuplicate.player} — новая попытка…`,"bad");
+      setTimeout(()=>startNewAttempt(`AUTO ERROR: повтор игрока ${pageDuplicate.player}`,{allowReloadFallback:true}),40);
+    }
 
     if(!parsed.pick && page.occupied===0 && continuousAutomationWanted()){
       setTimeout(()=>maybeAutoStartGame("автопродолжение после перезапуска"),60);
