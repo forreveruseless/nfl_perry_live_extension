@@ -10,6 +10,7 @@
   let pageSync=true, lastPageSignature="";
   let autoDraft=false, autoStrategy="potential", autoDelay=900;
   let autoRestart=false, restartBusy=false;
+  let minPotentialValue="", useSiteHighScore=false, thresholdRestartBusy=false;
   let autoBusy=false, autoTimer=null, autoPendingKey="", autoRunToken=0;
   let gameHistory=[], lastRecordedGameSig="";
   let worker=null, workerReady=false, reqSeq=0, activeStateReq=0, activeCandReq=0;
@@ -31,7 +32,7 @@
     return new Promise(resolve=>chrome.storage.local.get([
       "nflpLiveRoster","nflpLiveTeam","nflpAutoCapture","nflpPageSync",
       "nflpAutoDraft","nflpAutoStrategy","nflpAutoDelay","nflpAutoRestart",
-      "nflpGameHistory"
+      "nflpMinPotentialValue","nflpUseSiteHighScore","nflpGameHistory"
     ],resolve));
   }
   async function storageSet(obj){ return new Promise(resolve=>chrome.storage.local.set(obj,resolve)); }
@@ -146,6 +147,22 @@
                 После 6/6 автоматически начать новую игру
               </label>
 
+              <div class="nflp-threshold-box">
+                <div class="nflp-threshold-title">Минимальный потенциальный максимум</div>
+                <div class="nflp-threshold-row">
+                  <input id="nflp-min-potential" class="nflp-number" type="number" min="0" max="400" step="0.1" placeholder="например 295.0">
+                  <span class="nflp-threshold-unit">FPTS</span>
+                </div>
+                <label class="nflp-check" style="margin-top:7px">
+                  <input type="checkbox" id="nflp-use-highscore">
+                  Использовать мой HIGH SCORE с NFLPerry:
+                  <b id="nflp-highscore-value">—</b>
+                </label>
+                <div class="nflp-status" id="nflp-threshold-status">
+                  Если лучший достижимый Potential опустится ниже порога, текущая попытка будет сразу перезапущена.
+                </div>
+              </div>
+
               <div class="nflp-status" id="nflp-auto-status">Auto Draft выключен.</div>
               <div class="nflp-status" id="nflp-restart-status"></div>
             </div>
@@ -259,6 +276,21 @@
       autoRestart=e.target.checked;
       storageSet({nflpAutoRestart:autoRestart});
       renderAutoControls();
+    };
+
+    $("#nflp-min-potential",root).oninput=e=>{
+      minPotentialValue=e.target.value;
+      storageSet({nflpMinPotentialValue:minPotentialValue});
+      renderThresholdControls();
+      if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),80);
+      setTimeout(()=>enforcePotentialFloor("setting"),80);
+    };
+    $("#nflp-use-highscore",root).onchange=e=>{
+      useSiteHighScore=e.target.checked;
+      storageSet({nflpUseSiteHighScore:useSiteHighScore});
+      renderThresholdControls();
+      if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),80);
+      setTimeout(()=>enforcePotentialFloor("setting"),80);
     };
 
     $$("[data-tab]",root).forEach(btn=>btn.onclick=()=>{
@@ -459,6 +491,77 @@
     el.textContent=msg;
   }
 
+
+  function siteHighScoreFromPage(){
+    const lines=pageLines();
+    for(const line of lines){
+      const m=line.match(/HIGH\s+SCORE\s*:\s*(\d+(?:\.\d+)?)/i);
+      if(m)return +m[1];
+    }
+    return null;
+  }
+
+  function localBestScore(){
+    const vals=gameHistory.map(g=>+g.score).filter(Number.isFinite);
+    return vals.length?Math.max(...vals):null;
+  }
+
+  function resolvedHighScore(){
+    const page=siteHighScoreFromPage();
+    if(Number.isFinite(page))return {value:page,source:"NFLPerry"};
+    const local=localBestScore();
+    if(Number.isFinite(local))return {value:local,source:"локальная история"};
+    return {value:null,source:"не найден"};
+  }
+
+  function numericMinPotential(){
+    const v=Number.parseFloat(String(minPotentialValue).replace(",","."));
+    return Number.isFinite(v)&&v>0?v:null;
+  }
+
+  function effectivePotentialFloor(){
+    if(useSiteHighScore){
+      const hs=resolvedHighScore();
+      return Number.isFinite(hs.value)?hs.value:null;
+    }
+    return numericMinPotential();
+  }
+
+  function thresholdEnabled(){
+    return Number.isFinite(effectivePotentialFloor());
+  }
+
+  function renderThresholdControls(){
+    const input=$("#nflp-min-potential",root);
+    const check=$("#nflp-use-highscore",root);
+    const hsEl=$("#nflp-highscore-value",root);
+    const status=$("#nflp-threshold-status",root);
+    if(input){
+      input.value=minPotentialValue;
+      input.disabled=useSiteHighScore;
+    }
+    if(check)check.checked=useSiteHighScore;
+
+    const hs=resolvedHighScore();
+    if(hsEl)hsEl.textContent=Number.isFinite(hs.value)?`${hs.value.toFixed(1)} (${hs.source})`:"—";
+
+    const floor=effectivePotentialFloor();
+    if(status){
+      if(Number.isFinite(floor)){
+        status.className="nflp-status ok";
+        status.textContent=`Активный порог: ${floor.toFixed(1)} FPTS. Если текущий/следующий лучший Potential < ${floor.toFixed(1)}, попытка перезапустится.`;
+      }else{
+        status.className="nflp-status";
+        status.textContent="Порог выключен: введи число или включи HIGH SCORE.";
+      }
+    }
+  }
+
+  function currentExactPotential(){
+    if(!model)return null;
+    try{return NBA.exactCeiling(model,roster).total}catch{return null}
+  }
+
   function renderAutoControls(){
     const btn=$("#nflp-autodraft-toggle",root);
     const strategy=$("#nflp-autostrategy",root);
@@ -471,6 +574,7 @@
     if(delay)delay.value=String(autoDelay);
     const ar=$("#nflp-autorestart",root);
     if(ar)ar.checked=autoRestart;
+    renderThresholdControls();
   }
 
   function stopAutoDraft(message="Остановлено."){
@@ -687,6 +791,13 @@
       return;
     }
 
+    const floor=effectivePotentialFloor();
+    if(Number.isFinite(floor) && Number.isFinite(chosen.ceiling) && chosen.ceiling < floor-1e-9){
+      setAutoStatus(`Лучший пик оставит Potential ${chosen.ceiling.toFixed(1)} < ${floor.toFixed(1)}. Перезапуск…`,"bad");
+      startNewAttempt(`Лучший доступный Potential ${chosen.ceiling.toFixed(1)} < минимум ${floor.toFixed(1)}`,{allowReloadFallback:true});
+      return;
+    }
+
     const key=`${parsed.pick}|${parsed.team}|${autoStrategy}|${chosen.player._id}|${chosen.slot}`;
     if(autoPendingKey===key)return;
 
@@ -762,6 +873,7 @@
     $("#nflp-pagesync",root).checked=pageSync;
     $("#nflp-autocap",root).checked=autoCapture;
     renderAutoControls();
+    renderThresholdControls();
     $("#nflp-source",root).textContent=`База: ${source} · ${players.length} активных записей`;
   }
 
@@ -1062,52 +1174,122 @@
     }).filter(x=>x.score>=0).sort((a,b)=>b.score-a.score);
   }
 
+
+  function restartStateSignature(){
+    const page=readRosterFromPage();
+    const parsed=page.parsed||{};
+    return JSON.stringify({
+      pick:parsed.pick||null,
+      team:parsed.team||null,
+      roster:Object.fromEntries(Object.entries(page.roster||{}).map(([s,r])=>[s,[r.name,r.team,r.fpts]]))
+    });
+  }
+
+  async function startNewAttempt(reason,{allowReloadFallback=true}={}){
+    if(restartBusy||thresholdRestartBusy)return false;
+    thresholdRestartBusy=true;
+    restartBusy=true;
+    autoRunToken++;
+    autoBusy=false;
+    autoPendingKey="";
+    if(autoTimer){clearTimeout(autoTimer);autoTimer=null}
+
+    const status=$("#nflp-restart-status",root);
+    const thresholdStatus=$("#nflp-threshold-status",root);
+    if(status)status.textContent=`Перезапуск: ${reason}`;
+    if(thresholdStatus && reason.includes("Potential"))thresholdStatus.textContent=`${reason}. Перезапускаю попытку…`;
+
+    try{
+      // Prefer a real restart/new-game button when one exists.
+      const list=restartButtonCandidates();
+      const candidate=list.length===1 ? list[0] :
+        (list.length>1 && list[0].score>list[1].score ? list[0] : null);
+
+      if(candidate){
+        await sleep(220);
+        candidate.el.scrollIntoView({block:"center",behavior:"auto"});
+        candidate.el.click();
+        if(status)status.textContent=`Нажал "${candidate.text}". Жду новую игру…`;
+
+        const started=await waitFor(()=>{
+          const parsed=parsePageStateFromLines(pageLines());
+          const p=readRosterFromPage();
+          return parsed.pick===1 && p.occupied===0;
+        },6000,160);
+
+        if(started){
+          lastPageSignature="";
+          autoPendingKey="";
+          try{sessionStorage.removeItem("__nflp_floor_reload__")}catch{}
+          if(status)status.textContent="Новая попытка запущена ✓";
+          syncFromNFLPerryPage(false);
+          if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),450);
+          return true;
+        }
+      }
+
+      if(!allowReloadFallback){
+        if(status)status.textContent="Кнопка перезапуска не найдена.";
+        return false;
+      }
+
+      // Mid-draft NFLPerry may not expose a dedicated restart button.
+      // A hard reload is the safe fallback used only once per identical state.
+      const sig=restartStateSignature();
+      let prev=null;
+      try{prev=JSON.parse(sessionStorage.getItem("__nflp_floor_reload__")||"null")}catch{}
+      const now=Date.now();
+      if(prev && prev.sig===sig && now-(prev.at||0)<12000){
+        if(status)status.textContent="Reload не изменил игру. Автоповтор остановлен, чтобы не попасть в цикл.";
+        autoDraft=false;
+        storageSet({nflpAutoDraft:false});
+        renderAutoControls();
+        return false;
+      }
+
+      try{sessionStorage.setItem("__nflp_floor_reload__",JSON.stringify({sig,at:now,reason}))}catch{}
+      if(status)status.textContent="Кнопка не найдена — перезагружаю NBA Game Mode…";
+      await storageSet({
+        nflpAutoDraft:autoDraft,
+        nflpMinPotentialValue:minPotentialValue,
+        nflpUseSiteHighScore:useSiteHighScore
+      });
+      location.reload();
+      return true;
+    }catch(err){
+      if(status)status.textContent=`Перезапуск: ${err?.message||err}`;
+      return false;
+    }finally{
+      // If location.reload() succeeds this context is destroyed.
+      // Otherwise unlock after a short delay.
+      setTimeout(()=>{restartBusy=false;thresholdRestartBusy=false},1000);
+    }
+  }
+
+  async function enforcePotentialFloor(origin="sync"){
+    const floor=effectivePotentialFloor();
+    if(!Number.isFinite(floor)||!model||thresholdRestartBusy)return false;
+
+    const page=readRosterFromPage();
+    const parsed=page.parsed||{};
+    // Do not judge an uninitialized/non-game page.
+    if(!parsed.pick && page.occupied===0)return false;
+
+    const current=currentExactPotential();
+    if(Number.isFinite(current) && current < floor-1e-9){
+      const msg=`Potential ${current.toFixed(1)} < минимум ${floor.toFixed(1)}`;
+      toast(`${msg} — новая попытка`);
+      await startNewAttempt(msg,{allowReloadFallback:true});
+      return true;
+    }
+    return false;
+  }
+
   async function maybeAutoRestart(page){
     if(!autoRestart || restartBusy)return;
     const game=completedGameFromPage(page);
     if(!game)return;
-
-    restartBusy=true;
-    const status=$("#nflp-restart-status",root);
-    if(status)status.textContent="6/6 завершено. Ищу кнопку новой игры…";
-
-    try{
-      const candidate=await waitFor(()=>{
-        const list=restartButtonCandidates();
-        return list.length===1 ? list[0] : (list.length>1 && list[0].score>list[1].score ? list[0] : null);
-      },8000,200);
-
-      if(!candidate){
-        if(status)status.textContent="Автоперезапуск: кнопка новой игры не распознана. Пришли скрин финального экрана.";
-        restartBusy=false;
-        return;
-      }
-
-      await sleep(650);
-      candidate.el.scrollIntoView({block:"center",behavior:"auto"});
-      candidate.el.click();
-      if(status)status.textContent=`Нажал "${candidate.text}". Жду Draft Pick 1/6…`;
-
-      const started=await waitFor(()=>{
-        const parsed=parsePageStateFromLines(pageLines());
-        const p=readRosterFromPage();
-        return parsed.pick===1 && p.occupied===0;
-      },7000,180);
-
-      if(started){
-        lastPageSignature="";
-        autoPendingKey="";
-        if(status)status.textContent="Новая игра запущена ✓";
-        syncFromNFLPerryPage(false);
-        if(autoDraft)setTimeout(()=>maybeScheduleAutoDraft(),500);
-      }else{
-        if(status)status.textContent="Кнопка нажата, но новая игра не подтверждена.";
-      }
-    }catch(err){
-      if(status)status.textContent=`Автоперезапуск: ${err?.message||err}`;
-    }finally{
-      restartBusy=false;
-    }
+    await startNewAttempt("6/6 завершено",{allowReloadFallback:true});
   }
 
   function syncFromNFLPerryPage(showToast=false){
@@ -1116,6 +1298,8 @@
     const page=readRosterFromPage();
     const parsed=page.parsed||{};
     const clean=cleanRosterForOptimizer(page.roster);
+
+    renderThresholdControls();
 
     if(page.occupied===6 && page.matched===6){
       maybeRecordCompletedGame(page);
@@ -1156,7 +1340,10 @@
       analyzeState();
       analyzeCandidates();
       if(showToast) toast(`PAGE SYNC · ${parsed.team||"?"} · состав ${page.matched}/${page.occupied}`);
+      setTimeout(()=>enforcePotentialFloor("sync"),80);
       setTimeout(()=>maybeScheduleAutoDraft(),180);
+    }else{
+      setTimeout(()=>enforcePotentialFloor("poll"),80);
     }
     return changed;
   }
@@ -1223,11 +1410,21 @@
     currentTeam=NBA.ACTIVE_TEAMS.includes(saved.nflpLiveTeam)?saved.nflpLiveTeam:"SAS";
     autoCapture=saved.nflpAutoCapture===true;
     pageSync=saved.nflpPageSync!==false;
-    // Default is OFF. In explicit continuous mode (Auto Restart enabled),
-    // preserve Auto Draft across a page reload/navigation.
     autoRestart=saved.nflpAutoRestart===true;
-    autoDraft=autoRestart && saved.nflpAutoDraft===true;
-    if(!autoRestart)storageSet({nflpAutoDraft:false});
+    minPotentialValue=saved.nflpMinPotentialValue??"";
+    useSiteHighScore=saved.nflpUseSiteHighScore===true;
+
+    const savedFloor=(()=>{
+      if(useSiteHighScore)return true;
+      const v=Number.parseFloat(String(minPotentialValue).replace(",","."));
+      return Number.isFinite(v)&&v>0;
+    })();
+
+    // Preserve Auto Draft across automatic restarts/reloads only when the user
+    // explicitly enabled continuous behavior (auto restart or potential floor).
+    autoDraft=(autoRestart||savedFloor) && saved.nflpAutoDraft===true;
+    if(!(autoRestart||savedFloor))storageSet({nflpAutoDraft:false});
+
     autoStrategy=["potential","expected","p295"].includes(saved.nflpAutoStrategy)?saved.nflpAutoStrategy:"potential";
     autoDelay=[500,900,1500,2500].includes(+saved.nflpAutoDelay)?+saved.nflpAutoDelay:900;
     gameHistory=Array.isArray(saved.nflpGameHistory)?saved.nflpGameHistory:[];
@@ -1236,6 +1433,11 @@
     await reloadPlayers(false);
     renderStats();
     syncFromNFLPerryPage(false);
+    try{
+      const p=readRosterFromPage();
+      const parsed=p.parsed||{};
+      if(parsed.pick===1 && p.occupied===0)sessionStorage.removeItem("__nflp_floor_reload__");
+    }catch{}
 
     let timer=null;
     const obs=new MutationObserver(()=>{

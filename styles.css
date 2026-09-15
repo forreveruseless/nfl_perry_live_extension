@@ -85,3 +85,11 @@
 .nflp-history-lineup span{color:#dbe5f2}
 .nflp-history-lineup small{color:#76879e;margin-left:4px}
 .nflp-history-lineup b{text-align:right;color:#ffd0a6}
+
+.nflp-threshold-box{margin-top:10px;border:1px solid #4c5d78;border-radius:11px;padding:9px;background:#0c1521}
+.nflp-threshold-title{font:950 10px system-ui;text-transform:uppercase;letter-spacing:.07em;color:#b4c2d5;margin-bottom:7px}
+.nflp-threshold-row{display:flex;gap:7px;align-items:center}
+.nflp-number{width:100%;min-width:0;background:#101925;color:#fff;border:1px solid #3a4860;border-radius:9px;padding:8px 9px;font:900 12px system-ui;outline:none}
+.nflp-number:focus{border-color:#d37c42;box-shadow:0 0 0 2px #d37c4222}
+.nflp-number:disabled{opacity:.45;cursor:not-allowed}
+.nflp-threshold-unit{font:900 10px system-ui;color:#8292a8}
